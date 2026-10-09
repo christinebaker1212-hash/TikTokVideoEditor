@@ -12,3 +12,4 @@ workspace/
 build/
 dist/
 *.log
+target/
