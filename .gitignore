@@ -11,3 +11,4 @@ workspace/
 .venv/
 build/
 dist/
+*.log
