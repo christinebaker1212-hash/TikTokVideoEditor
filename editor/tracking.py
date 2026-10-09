@@ -25,6 +25,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from . import tools
 from .config import WORKSPACE
 from .media import probe
 
@@ -85,7 +86,7 @@ def analyse_frames(frames, motion_weight: float = 1.0, color_weight: float = 1.0
 
 
 def _iter_frames(path: str, width: int, height: int):
-    proc = subprocess.Popen(
+    proc = tools.popen(
         ["ffmpeg", "-v", "error", "-nostdin", "-i", path, "-an", "-vf", f"scale={width}:{height}:flags=area",
          "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,

@@ -32,9 +32,9 @@
     <section class="tab" id="tab-sources">
       <h3>Source videos</h3>
       <label>With UI <span class="muted" id="uiInfo"></span></label>
-      <div class="row"><input id="uiPath" placeholder="/path/to/with_ui.mp4"><label class="btn file">Upload<input type="file" accept="video/*" data-upload="uiPath" hidden></label></div>
+      <div class="row"><input id="uiPath" placeholder="Video with UI"><button class="desktop-only" data-browse="uiPath" data-kind="video">Browse…</button><label class="btn file browser-only">Upload<input type="file" accept="video/*" data-upload="uiPath" hidden></label></div>
       <label>Without UI (clean) <span class="muted" id="cleanInfo"></span></label>
-      <div class="row"><input id="cleanPath" placeholder="/path/to/clean.mp4"><label class="btn file">Upload<input type="file" accept="video/*" data-upload="cleanPath" hidden></label></div>
+      <div class="row"><input id="cleanPath" placeholder="Video without UI"><button class="desktop-only" data-browse="cleanPath" data-kind="video">Browse…</button><label class="btn file browser-only">Upload<input type="file" accept="video/*" data-upload="cleanPath" hidden></label></div>
       <button id="loadSources" class="primary">Load videos</button>
 
       <h3>Sync</h3>
@@ -167,7 +167,7 @@
     <!-- 4. Music & export -->
     <section class="tab hidden" id="tab-export">
       <h3>Background music</h3>
-      <div class="row"><input id="musicPath" placeholder="/path/to/song.mp3" data-path="music.path"><label class="btn file">Upload<input type="file" accept="audio/*,video/*" data-upload="musicPath" hidden></label></div>
+      <div class="row"><input id="musicPath" placeholder="Song file" data-path="music.path"><button class="desktop-only" data-browse="musicPath" data-kind="audio">Browse…</button><label class="btn file browser-only">Upload<input type="file" accept="audio/*,video/*" data-upload="musicPath" hidden></label></div>
       <div class="grid2">
         <label>Song starts at (s)<input type="number" min="0" step="0.1" data-path="music.start"></label>
         <label>Music volume <output data-for="musicVol"></output><input id="musicVol" type="range" min="0" max="1.5" step="0.01" data-path="music.volume"></label>
@@ -178,7 +178,8 @@
       <label class="inline"><input type="checkbox" id="musicPreview" checked> Play music in preview</label>
 
       <h3>Export</h3>
-      <label>Output file<input id="outPath" placeholder="(default: workspace/exports/&lt;name&gt;.mp4)" data-path="export.output"></label>
+      <label>Output file</label>
+      <div class="row"><input id="outPath" placeholder="(default: workspace/exports/&lt;name&gt;.mp4)" data-path="export.output"><button class="desktop-only" id="outBrowse">Browse…</button></div>
       <div class="grid2">
         <label>Upscaler<select data-path="export.scaler"><option value="lanczos">Lanczos (best)</option><option value="cubic">Bicubic (4× faster)</option></select></label>
         <span></span>
@@ -197,6 +198,7 @@
       </div>
       <progress id="exportProgress" max="1" value="0" class="hidden"></progress>
       <div id="exportMsg" class="muted"></div>
+      <button id="revealOut" class="desktop-only hidden">Show in folder</button>
     </section>
   </aside>
 

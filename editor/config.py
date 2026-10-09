@@ -3,12 +3,41 @@
 from __future__ import annotations
 
 import copy
+import os
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-WEB_DIR = ROOT / "web"
-PRESET_DIR = ROOT / "presets"
-WORKSPACE = ROOT / "workspace"
+FROZEN = getattr(sys, "frozen", False)
+# Read-only resources (web UI, bundled ffmpeg): inside the PyInstaller bundle when frozen.
+BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", ROOT))
+# The portable app's own folder (next to the .exe), or the repo when run from source.
+APP_DIR = Path(sys.executable).resolve().parent if FROZEN else ROOT
+
+
+def _data_dir() -> Path:
+    """Writable folder for presets, projects, caches and exports.
+
+    Portable by default (next to the program). Falls back to %LOCALAPPDATA% when
+    that folder is read-only, e.g. if the app was copied into Program Files.
+    """
+    override = os.environ.get("COMBO_EDITOR_DATA")
+    if override:
+        return Path(override)
+    try:
+        probe_file = APP_DIR / ".write-test"
+        probe_file.write_text("")
+        probe_file.unlink()
+        return APP_DIR
+    except OSError:
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/.local/share")
+        return Path(base) / "ComboEditor"
+
+
+DATA_DIR = _data_dir()
+WEB_DIR = BUNDLE_DIR / "web"
+PRESET_DIR = DATA_DIR / "presets"
+WORKSPACE = DATA_DIR / "workspace"
 
 # Output (TikTok) frame size.
 OUT_W = 1080

@@ -10,17 +10,35 @@ UI elements (by default the enemy health bar and the combo damage box) are cut o
 recording and laid on top with feathered edges and adjustable opacity. You can add background
 music, and the result exports as a single H.264/AAC file.
 
-## Setup
+## Windows: portable app (recommended)
 
-You need Python 3.10+ and **ffmpeg** (with `ffprobe`) on your `PATH`.
+Download `ComboEditor-win64` from the latest
+[Windows portable build](../../actions/workflows/windows-build.yml) run (or from a release),
+unzip it anywhere (even a USB stick) and run **`ComboEditor.exe`**. There is no installer and
+nothing else to download: Python and ffmpeg are bundled, and the editor opens in its own
+window with native **Browse…** buttons. Your presets, projects and exports stay inside that
+folder, so you can move or back it up by copying the folder. `README.txt` in the folder has
+the details.
+
+To build it yourself on Windows (Python 3.10+ needed only for building):
+
+```powershell
+.\packaging\build_windows.ps1     # -> dist\ComboEditor\ and dist\ComboEditor-win64.zip
+python packaging\smoke_test.py dist\ComboEditor
+```
+
+## Running from source
+
+You need Python 3.10+ and **ffmpeg** (with `ffprobe`) on your `PATH`, or in an `ffmpeg`
+folder in the repo.
 
 ```bash
 pip install -r requirements.txt
-python -m editor            # opens http://127.0.0.1:8765 in your browser
+python -m editor             # native window on Windows; elsewhere opens your browser
+python -m editor --browser   # always use the browser (Chrome/Edge play H.264 MP4s)
 ```
 
-Use Chrome or Edge, which play H.264 MP4s natively. To run the tests:
-`pip install -r requirements-dev.txt && pytest`.
+To run the tests: `pip install -r requirements-dev.txt && pytest`.
 
 ## Workflow
 
@@ -74,7 +92,7 @@ enter. The default settings are x264 CRF 16, preset `slow`, Lanczos upscaling an
 Bicubic upscaling is about 4× faster for drafts.
 
 Use the header buttons to save projects. Presets live in `presets/` and projects in
-`workspace/projects/`.
+`workspace/projects/` (next to `ComboEditor.exe` in the portable app).
 
 ## How it works
 
@@ -86,7 +104,10 @@ editor/
   compositor.py  sub-pixel crop/upscale (warpAffine) + feathered UI element blending
   render.py      frame-accurate decode of both videos -> compose -> ffmpeg (x264 + audio mix)
   server.py      FastAPI backend for the browser editor
+  desktop.py     native window (pywebview / Edge WebView2) + file dialogs
+  tools.py       finds the bundled or system ffmpeg
 web/             the editor UI (no build step)
+packaging/       PyInstaller spec, Windows build script, packaged-app smoke test
 ```
 
 The camera path is computed in a single place (`camera.py`). The browser preview samples the

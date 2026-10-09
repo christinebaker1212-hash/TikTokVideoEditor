@@ -1087,6 +1087,9 @@ async function startExport() {
       exportJob = null;
       if (job.status === 'done') {
         $('#exportMsg').innerHTML = `Done → <a href="/api/media?path=${enc(job.output)}" target="_blank" rel="noopener">${job.output.replace(/</g, '&lt;')}</a>`;
+        const reveal = $('#revealOut');
+        reveal.classList.remove('hidden');
+        reveal.onclick = () => window.pywebview?.api.reveal(job.output);
         status('Export finished');
       } else {
         status(job.message, job.status === 'error');
@@ -1094,6 +1097,27 @@ async function startExport() {
     };
     poll();
   }, 'Starting export…');
+}
+
+// ---------------------------------------------------------------- desktop (pywebview) integration
+
+function setupDesktop() {
+  // In the Windows app the page runs inside a native window that exposes file dialogs.
+  document.body.classList.add('desktop');
+  $$('[data-browse]').forEach((b) => (b.onclick = async () => {
+    const path = await window.pywebview.api.pick_file(b.dataset.kind);
+    if (!path) return;
+    const target = $('#' + b.dataset.browse);
+    target.value = path;
+    target.dispatchEvent(new Event('change'));
+    if (b.dataset.browse !== 'musicPath' && $('#uiPath').value && $('#cleanPath').value) loadSources();
+  }));
+  $('#outBrowse').onclick = async () => {
+    const path = await window.pywebview.api.pick_save(`${state.project.name || 'export'}.mp4`);
+    if (!path) return;
+    $('#outPath').value = path;
+    $('#outPath').dispatchEvent(new Event('change'));
+  };
 }
 
 // ---------------------------------------------------------------- boot
@@ -1104,6 +1128,8 @@ async function boot() {
   try { saved = JSON.parse(localStorage.getItem('comboEditor.project') || 'null'); } catch { /* ignore */ }
   state.project = deepMerge(defaults, saved || {});
   setupEvents();
+  if (window.pywebview?.api) setupDesktop();
+  else window.addEventListener('pywebviewready', setupDesktop, { once: true });
   renderAll();
   await refreshPresetLists();
   requestAnimationFrame(frameLoop);

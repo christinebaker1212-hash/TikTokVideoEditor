@@ -10,6 +10,7 @@ from typing import Callable
 
 import numpy as np
 
+from . import tools
 from .camera import build_timeline, sample
 from .compositor import compose
 from .config import OUT_H, OUT_W, normalize_project
@@ -115,7 +116,7 @@ def export(project: dict, output: str, progress: Callable[[float, str], None] | 
             "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out_path)]
 
     log = tempfile.TemporaryFile()
-    enc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=log)
+    enc = tools.popen(cmd, stdin=subprocess.PIPE, stderr=log)
     clean_r = FrameReader(project["sources"]["clean"], start, fps, info.width, info.height)
     ui_r = None
     if project["sources"]["ui"]:

@@ -9,3 +9,5 @@ workspace/
 *.mp3
 !tests/fixtures/**
 .venv/
+build/
+dist/

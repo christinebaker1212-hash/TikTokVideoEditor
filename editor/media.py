@@ -9,6 +9,8 @@ from fractions import Fraction
 
 import numpy as np
 
+from . import tools
+
 
 class MediaError(RuntimeError):
     pass
@@ -29,12 +31,12 @@ class VideoInfo:
 
 def probe(path: str) -> VideoInfo:
     try:
-        out = subprocess.run(
+        out = tools.run(
             ["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", "-show_format", path],
             check=True, capture_output=True, text=True,
         ).stdout
     except FileNotFoundError as exc:
-        raise MediaError("ffprobe not found; install ffmpeg") from exc
+        raise MediaError("ffprobe not found: put ffmpeg in the 'ffmpeg' folder next to the program or on PATH") from exc
     except subprocess.CalledProcessError as exc:
         raise MediaError(f"Could not read {path}: {exc.stderr.strip()}") from exc
     data = json.loads(out)
@@ -65,7 +67,7 @@ def load_audio(path: str, sr: int = 16000, start: float = 0.0, duration: float |
     if duration is not None:
         cmd += ["-t", f"{duration:.6f}"]
     cmd += ["-vn", "-ac", "1", "-ar", str(sr), "-f", "f32le", "-"]
-    proc = subprocess.run(cmd, capture_output=True)
+    proc = tools.run(cmd, capture_output=True)
     if proc.returncode != 0:
         raise MediaError(f"Could not decode audio from {path}: {proc.stderr.decode(errors='ignore').strip()}")
     return np.frombuffer(proc.stdout, dtype=np.float32).copy()
@@ -93,7 +95,7 @@ class FrameReader:
             "-vf", f"fps={fps:.6f},scale={width}:{height}:flags=lanczos",
             "-f", "rawvideo", "-pix_fmt", "bgr24", "-",
         ]
-        self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        self.proc = tools.popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
     def read(self) -> np.ndarray:
         if self.pad > 0:
@@ -124,7 +126,7 @@ def read_frame(path: str, t: float, width: int, height: int) -> np.ndarray:
     """Read a single frame at time ``t`` (black if before the start)."""
     if t < 0:
         return np.zeros((height, width, 3), np.uint8)
-    proc = subprocess.run(
+    proc = tools.run(
         ["ffmpeg", "-v", "error", "-nostdin", "-ss", f"{t:.6f}", "-i", path, "-frames:v", "1",
          "-vf", f"scale={width}:{height}:flags=lanczos", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
         capture_output=True,

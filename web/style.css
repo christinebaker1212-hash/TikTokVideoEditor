@@ -29,6 +29,7 @@ footer { border-top: 1px solid var(--line); padding: 6px 10px 8px; }
 .muted { color: var(--muted); }
 .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
 .hidden { display: none !important; }
+body:not(.desktop) .desktop-only, body.desktop .browser-only { display: none !important; }
 .offscreen { position: fixed; left: -10px; top: -10px; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 
 main { display: grid; grid-template-columns: 380px 1fr; min-height: 0; }
