@@ -6,6 +6,11 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Publish a GitHub Release with this tag (e.g. v1.0.0); leave empty to just build"
+        required: false
+        default: ""
 
 permissions:
   contents: write # publish the zip to a GitHub Release on version tags
@@ -44,9 +49,13 @@ jobs:
           path: dist/ComboEditor/
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
         uses: softprops/action-gh-release@v2
         with:
+          # On a manual run this creates the tag at the built commit.
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          name: Combo Editor ${{ inputs.release_tag || github.ref_name }}
           files: dist/ComboEditor-*-win64.zip
           generate_release_notes: true
 
