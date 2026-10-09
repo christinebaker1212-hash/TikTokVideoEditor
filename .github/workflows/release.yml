@@ -1,0 +1,60 @@
+name: Build
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write # publish the zip to a GitHub Release on version tags
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Get ffmpeg
+        shell: pwsh
+        run: ./packaging/get-ffmpeg.ps1 -Dest ffmpeg
+
+      - name: Test
+        shell: pwsh
+        run: |
+          $env:PATH = "$PWD\ffmpeg;$env:PATH"
+          cargo test --release
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package
+        shell: pwsh
+        run: ./packaging/package-windows.ps1
+
+      - name: Smoke test the packaged app
+        run: python packaging/smoke_test.py dist/ComboEditor
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ComboEditor-win64
+          path: dist/ComboEditor/
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ComboEditor-*-win64.zip
+          generate_release_notes: true
+
+  linux-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg libasound2-dev
+      - run: cargo test --release

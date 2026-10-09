@@ -24,7 +24,8 @@ anyhow = "1"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
 
-[target.'cfg(windows)'.build-dependencies]
+[build-dependencies]
+# Only used when the target is Windows (checked in build.rs).
 winresource = "0.1"
 
 [profile.release]

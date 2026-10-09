@@ -77,3 +77,13 @@ pub fn command(name: &str) -> Command {
     }
     cmd
 }
+
+/// Append a line to `combo-editor.log` in the data folder (the GUI has no console).
+pub fn log(msg: &str) {
+    use std::io::Write;
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let _ = std::fs::create_dir_all(data_dir());
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(data_dir().join("combo-editor.log")) {
+        let _ = writeln!(f, "[{secs}] {msg}");
+    }
+}

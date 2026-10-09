@@ -1,115 +1,102 @@
 # Combo Editor: automatic TikTok edits for fighting-game combos
 
-This tool turns two 1920×1080 recordings of the same combo into a 1080×1920 TikTok video:
+A native Windows program that turns two 1920×1080 recordings of the same combo into a
+1080×1920 TikTok video:
 
-- one recording **with UI** (health bars, damage readout)
-- one recording **without UI** (the clean gameplay)
+- one recording **with UI** (health bars, damage readout);
+- one recording **without UI** (the clean gameplay).
 
-The clean gameplay is cropped to vertical with a camera that follows both fighters. Selected
-UI elements (by default the enemy health bar and the combo damage box) are cut out of the UI
-recording and laid on top with feathered edges and adjustable opacity. You can add background
-music, and the result exports as a single H.264/AAC file.
+The clean gameplay is cropped to vertical with a camera that follows both fighters. Chosen
+UI elements are cut from the UI recording and laid on top with feathered edges and
+adjustable opacity. You can add background music with fades, and the result exports as one
+H.264/AAC file.
 
-## Windows: portable app (recommended)
+## Download
 
-Download `ComboEditor-win64` from the latest
-[Windows portable build](../../actions/workflows/windows-build.yml) run (or from a release),
-unzip it anywhere (even a USB stick) and run **`ComboEditor.exe`**. There is no installer and
-nothing else to download: Python and ffmpeg are bundled, and the editor opens in its own
-window with native **Browse…** buttons. Your presets, projects and exports stay inside that
-folder, so you can move or back it up by copying the folder. `README.txt` in the folder has
-the details.
+Get **`ComboEditor-<version>-win64.zip`** from the repository's
+[Releases](../../releases) page. You can also download the `ComboEditor-win64` artifact from
+the latest [Build](../../actions/workflows/release.yml) run. Unzip it anywhere and run
+**`ComboEditor.exe`**.
 
-To build it yourself on Windows (Python 3.10+ needed only for building):
-
-```powershell
-.\packaging\build_windows.ps1     # -> dist\ComboEditor\ and dist\ComboEditor-win64.zip
-python packaging\smoke_test.py dist\ComboEditor
-```
-
-## Running from source
-
-You need Python 3.10+ and **ffmpeg** (with `ffprobe`) on your `PATH`, or in an `ffmpeg`
-folder in the repo.
-
-```bash
-pip install -r requirements.txt
-python -m editor             # native window on Windows; elsewhere opens your browser
-python -m editor --browser   # always use the browser (Chrome/Edge play H.264 MP4s)
-```
-
-To run the tests: `pip install -r requirements-dev.txt && pytest`.
+There is no installer and nothing else to download, because ffmpeg is bundled. Presets,
+projects and exports stay in that folder, so you can move or back up the app by copying it.
 
 ## Workflow
 
 ### 1. Sources & sync
-1. Paste the file paths of both recordings, or use **Upload**, then click **Load videos**.
+1. **Browse…** for both recordings. They load as soon as both are chosen.
 2. Click **Auto-sync (transients)**. Neither recording has music, so their game audio is
-   identical. The editor matches the sharp transients (hits, whiffs, announcer) with
-   spectral flux cross-correlation, then refines the result to the exact sample with GCC-PHAT.
-3. Check the result with the **Difference** source view. When the recordings are in sync,
-   everything except the UI turns black. Fine-tune with ±1 frame / ±10 ms, and use **Snap**
-   to round to a whole frame.
-4. Choose which recording supplies the game audio (the *primary volume*).
-5. Mark the clip's **In** and **Out** points under the timeline (keys `I` / `O`).
+   identical. The editor matches the sharp transients (hits, whiffs, announcer) and refines
+   the result to the exact sample.
+3. Check the result with the **Difference** view: when the recordings are in sync,
+   everything except the UI turns black. Fine-tune with ±1 frame or ±10 ms.
+4. Choose which recording supplies the game audio, and mark the clip's **In** and **Out**
+   points under the timeline (keys `I` / `O`).
 
 ### 2. Camera
-Click **Analyse fighters** once per clip. Then set the part markers under the timeline:
+Click **Analyse fighters** once per clip, then set the part markers under the timeline:
 
 | Part | Markers | Camera |
 |---|---|---|
-| Combo | In → Super start | Automatic: always centred between both fighters, at native scale (full-height 9:16 crop, no zoom) |
+| Combo | In → Super start | Automatic: always centred on both fighters, at native scale (full-height 9:16 crop) |
 | Super startup | Super start → Animation start | Manual keyframes |
 | Super animation | Animation start → Post start | Manual keyframes |
-| Post super | Post start → Out | Automatic centring, plus your X/Y offset, zoom and smoothing |
+| Post super | Post start → Out | Automatic centring, plus your offset, zoom and smoothing |
 
-In the super, move the playhead and **drag the preview** to pan or **scroll** to zoom. Each
-change creates or updates a keyframe at the playhead (`K` adds one). The super camera starts
-exactly where the combo camera stopped, and eases between keyframes. Keyframes can be dragged
-along the timeline. **Transitions** set how long the camera takes to blend between parts.
-
-The source view shows the crop window and the tracked edges of the action (cyan dashed lines).
-If tracking struggles on a stage, change the Motion / Colour weights. Colour works very well
-on the grey training stage. Motion compensates for camera pans and follows the fighters'
-animation.
+In the super, **drag the preview** to pan or **scroll** to zoom. Each change creates or
+updates a keyframe at the playhead (`K` adds one). Keyframes can be dragged along the
+timeline.
 
 ### 3. UI overlay
-- Each element has a **source** rectangle (in the 1920×1080 UI recording) and a **placement**
-  rectangle (in the 1080×1920 output). Drag them on the UI view and on the preview, or type
-  exact values.
-- **Blend**: opacity and a per-edge feather (in output pixels). Use **Save blend as…** to keep
-  a blend preset and apply it to any element.
-- **Visible during**: choose which parts show the element (for example, hide the UI during the
-  super animation). Elements fade over the *show/hide fade* time.
-- **UI skin presets** store the whole layout plus each element's blend. Save one per in-game
-  UI skin. The built-in *Default* matches the example layout.
+Each element has a **source** box (on the UI recording) and a **placement** box (on the
+TikTok frame). You can drag both or type exact values.
+- **Opacity and edge feathering** can be saved as blend presets.
+- **Visible during** chooses which parts show each element.
+- **UI skin presets** store the whole layout; save one per in-game UI skin.
 
 ### 4. Music & export
-Add a song, set where in the song to start, and set its volume, fade-in and fade-out (plus an
-optional fade-out on the game audio). **Exact frame** renders the current frame through the
-real export pipeline. **Export** writes `workspace/exports/<project>.mp4`, or the path you
-enter. The default settings are x264 CRF 16, preset `slow`, Lanczos upscaling and 256k AAC.
-Bicubic upscaling is about 4× faster for drafts.
+- Pick a song, where in the song to start, its volume, and its fade-in and fade-out.
+- **Exact frame** renders the current frame through the real export pipeline.
+- **Export** writes `workspace\exports\<project>.mp4`, or the file you choose. The default
+  settings are x264 CRF 16 and Lanczos upscaling.
 
-Use the header buttons to save projects. Presets live in `presets/` and projects in
-`workspace/projects/` (next to `ComboEditor.exe` in the portable app).
+### Keyboard
+`Space` play/pause · `←`/`→` one frame (with `Shift`: 1 s) · `I`/`O` clip start/end ·
+`K` keyframe · `F3` performance overlay.
+
+### Automation
+```
+ComboEditor.exe export project.json [-o out.mp4]   # render a saved project without the GUI
+ComboEditor.exe still project.json 12.5 frame.png  # one export-identical frame
+ComboEditor.exe sync with_ui.mp4 clean.mp4         # print the sync offset
+```
 
 ## How it works
 
-```
-editor/
-  sync.py        transient-based audio alignment (onset envelope xcorr + GCC-PHAT refine)
-  tracking.py    per-frame fighter extents: camera-shift-compensated motion + saturation
-  camera.py      markers + tracking + keyframes -> per-frame camera path & overlay alphas
-  compositor.py  sub-pixel crop/upscale (warpAffine) + feathered UI element blending
-  render.py      frame-accurate decode of both videos -> compose -> ffmpeg (x264 + audio mix)
-  server.py      FastAPI backend for the browser editor
-  desktop.py     native window (pywebview / Edge WebView2) + file dialogs
-  tools.py       finds the bundled or system ffmpeg
-web/             the editor UI (no build step)
-packaging/       PyInstaller spec, Windows build script, packaged-app smoke test
+| Module | Role |
+|---|---|
+| `src/media.rs` | ffmpeg/ffprobe I/O; all video is normalised to 8-bit BT.709 yuv420p |
+| `src/sync.rs` | Onset-envelope cross-correlation, then GCC-PHAT refinement |
+| `src/tracking.rs` | Per-frame fighter extents from camera-shift-compensated motion (phase correlation) plus saturation; parallel and cached |
+| `src/camera.rs` | Markers + tracking + keyframes → per-frame camera path and overlay visibility |
+| `src/imaging.rs` | YUV↔RGB, separable Lanczos/bicubic resampler, fast bilinear preview path |
+| `src/compositor.rs` | Crop + feathered UI elements, shared by the preview and the export |
+| `src/render.rs` | Export: decode threads → parallel compose → x264 encoder thread, plus the audio mix |
+| `src/gui/` | Native egui window. The decoder threads keep frame caches indexed by the same master frame number, so the two recordings play in lockstep, and the audio output is the playback clock |
+
+## Building
+
+You need Rust (stable), plus ffmpeg on `PATH` or in an `ffmpeg` folder next to the program.
+
+```powershell
+cargo test --release
+cargo build --release                      # target\release\combo-editor.exe
+.\packaging\get-ffmpeg.ps1 -Dest ffmpeg
+.\packaging\package-windows.ps1            # dist\ComboEditor\ + zip
+python packaging\smoke_test.py dist\ComboEditor
 ```
 
-The camera path is computed in a single place (`camera.py`). The browser preview samples the
-same per-frame arrays the exporter uses, so what you see is what you get. The only
-approximation is browser canvas scaling compared with Lanczos.
+Pushing a tag like `v1.0.0` makes CI build, test and publish the zip as a GitHub Release.
+
+The bundled ffmpeg is a GPL build ([BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds));
+its licence is included in the `ffmpeg` folder of the release.

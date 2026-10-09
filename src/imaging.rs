@@ -277,9 +277,55 @@ pub fn resample(src: &ImageF, ox: usize, oy: usize, ax: &Axis, ay: &Axis) -> Ima
     out
 }
 
+/// Bilinear sample straight from the YUV planes: what a GPU would do. Used for
+/// the live preview, where speed matters more than ideal downscaling.
+fn crop_scale_bilinear(frame: &YuvFrame, x0: f64, y0: f64, scale_x: f64, scale_y: f64, out_w: usize, out_h: usize) -> ImageF {
+    let mut out = ImageF::new(out_w, out_h);
+    let (fy, fu, fv) = (frame.y(), frame.u(), frame.v());
+    let (w, h) = (frame.w, frame.h);
+    let (cw, chh) = (w / 2, h / 2);
+    // Precompute horizontal sample positions for luma and chroma.
+    let col = |n: usize, origin: f64, scale: f64, sub: f64, max: usize| -> Vec<(usize, usize, f32)> {
+        (0..out_w)
+            .map(|u| {
+                let x = ((origin + (u as f64 + 0.5) / scale) / sub - 0.5).clamp(0.0, (max - 1) as f64);
+                let i = (x as usize).min(max - 1);
+                (i, (i + 1).min(max - 1), (x - i as f64) as f32)
+            })
+            .take(n)
+            .collect()
+    };
+    let lx = col(out_w, x0, scale_x, 1.0, w);
+    let cx = col(out_w, x0, scale_x, 2.0, cw);
+    out.data.par_chunks_mut(out_w * 3).enumerate().for_each(|(v, row)| {
+        let samp = |sub: f64, max: usize| {
+            let y = ((y0 + (v as f64 + 0.5) / scale_y) / sub - 0.5).clamp(0.0, (max - 1) as f64);
+            let i = (y as usize).min(max - 1);
+            (i, (i + 1).min(max - 1), (y - i as f64) as f32)
+        };
+        let (ly0, ly1, lay) = samp(1.0, h);
+        let (cy0, cy1, cay) = samp(2.0, chh);
+        let bil = |p: &[u8], stride: usize, (x0, x1, ax): (usize, usize, f32), y0: usize, y1: usize, ay: f32| {
+            let a = p[y0 * stride + x0] as f32 * (1.0 - ax) + p[y0 * stride + x1] as f32 * ax;
+            let b = p[y1 * stride + x0] as f32 * (1.0 - ax) + p[y1 * stride + x1] as f32 * ax;
+            a + (b - a) * ay
+        };
+        for u in 0..out_w {
+            let yy = bil(fy, w, lx[u], ly0, ly1, lay);
+            let uu = bil(fu, cw, cx[u], cy0, cy1, cay);
+            let vv = bil(fv, cw, cx[u], cy0, cy1, cay);
+            row[u * 3..u * 3 + 3].copy_from_slice(&yuv_to_rgb(yy, uu, vv));
+        }
+    });
+    out
+}
+
 /// Crop the region of `frame` covering `[x0, x0 + out_w/scale) x [y0, ...)`
 /// and scale it to `out_w x out_h`.
 pub fn crop_scale(frame: &YuvFrame, x0: f64, y0: f64, scale_x: f64, scale_y: f64, out_w: usize, out_h: usize, filter: Filter) -> ImageF {
+    if filter == Filter::Linear {
+        return crop_scale_bilinear(frame, x0, y0, scale_x, scale_y, out_w, out_h);
+    }
     let ax = axis(out_w, frame.w, scale_x, x0, filter);
     let ay = axis(out_h, frame.h, scale_y, y0, filter);
     let region = yuv_region(frame, ax.min, ay.min, ax.max - ax.min + 1, ay.max - ay.min + 1);

@@ -5,9 +5,10 @@
 use anyhow::{bail, Result};
 use std::sync::atomic::AtomicBool;
 
-use combo_editor::{project::Project, render, sync, tracking};
+use combo_editor::{paths, project::Project, render, sync, tracking};
 
 mod gui;
+mod icon;
 
 const USAGE: &str = "Combo Editor
 
@@ -83,11 +84,19 @@ fn main() {
         }
         return;
     }
+    std::panic::set_hook(Box::new(|info| {
+        paths::log(&format!("panic: {info}"));
+        eprintln!("{info}");
+    }));
     let flags: Vec<&str> = args.iter().map(String::as_str).filter(|a| a.starts_with("--")).collect();
     let project = args.iter().find(|a| !a.starts_with("--")).cloned();
     if let Err(e) = gui::run(project, flags.contains(&"--opengl")) {
         attach_console();
         eprintln!("error: {e:#}");
+        paths::log(&format!("could not start: {e:#}"));
+        if std::env::var_os("COMBO_EDITOR_SMOKE").is_some() {
+            std::process::exit(1);
+        }
         rfd::MessageDialog::new()
             .set_level(rfd::MessageLevel::Error)
             .set_title("Combo Editor")
