@@ -21,6 +21,7 @@ I / O set clip start / end, K add a camera keyframe, F3 performance overlay.
 Command line (automation):
   ComboEditor.exe export project.json [-o out.mp4]    render without opening the editor
   ComboEditor.exe still project.json 12.5 frame.png   render one frame exactly as exported
+  ComboEditor.exe detect project.json --write         find the Super Art and save the markers
   ComboEditor.exe sync with_ui.mp4 clean.mp4          print the sync offset
   ComboEditor.exe --opengl                            use OpenGL instead of DirectX 12
 

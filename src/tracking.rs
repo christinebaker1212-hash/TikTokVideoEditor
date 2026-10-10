@@ -43,6 +43,8 @@ pub struct Track {
     pub center_x: Vec<f64>,
     pub center_y: Vec<f64>,
     pub strength: Vec<f64>,
+    /// Frames that start a new shot (hard cuts, e.g. in a Super Art cinematic).
+    pub cuts: Vec<usize>,
 }
 
 /// 2-D FFT on a fixed-size grid (rows, then columns).
@@ -234,6 +236,49 @@ pub struct Features {
     gray: Vec<f32>,
     spec: Option<Vec<Complex32>>,
     color: Vec<f32>,
+    thumb: Vec<f32>,
+}
+
+/// Block-averaged grey thumbnail (about 48 blocks wide) for shot comparison.
+pub fn thumbnail(gray: &[f32], w: usize, h: usize) -> Vec<f32> {
+    let bw = (w / 48).max(1);
+    let bh = (h / 27).max(1);
+    let (tw, th) = (w / bw, h / bh);
+    let mut out = vec![0.0f32; tw * th];
+    for ty in 0..th {
+        for tx in 0..tw {
+            let mut acc = 0.0;
+            for y in ty * bh..(ty + 1) * bh {
+                for x in tx * bw..(tx + 1) * bw {
+                    acc += gray[y * w + x];
+                }
+            }
+            out[ty * tw + tx] = acc / (bw * bh) as f32;
+        }
+    }
+    out
+}
+
+/// True when `b` starts a new shot after `a`. Uses normalised correlation of
+/// thumbnails, so flashes and fades (which only change brightness) are not cuts.
+pub fn is_cut(a: &[f32], b: &[f32]) -> bool {
+    let n = a.len().min(b.len()) as f32;
+    if n == 0.0 {
+        return false;
+    }
+    let (ma, mb) = (a.iter().sum::<f32>() / n, b.iter().sum::<f32>() / n);
+    let (mut sab, mut saa, mut sbb) = (0.0f32, 0.0f32, 0.0f32);
+    for (x, y) in a.iter().zip(b) {
+        let (da, db) = (x - ma, y - mb);
+        sab += da * db;
+        saa += da * da;
+        sbb += db * db;
+    }
+    // Near-flat frames (black, white flash): only a large brightness jump counts.
+    if saa / n < 4.0 || sbb / n < 4.0 {
+        return (ma - mb).abs() > 60.0 && (saa / n < 4.0) != (sbb / n < 4.0);
+    }
+    sab / (saa.sqrt() * sbb.sqrt()) < 0.5
 }
 
 /// (left, right, top, bottom, strength); NaN extents when nothing was found.
@@ -269,12 +314,17 @@ impl Analyser {
             }
         }
         let spec = if self.cfg.motion_weight > 0.0 { Some(self.fft.forward(&gray)) } else { None };
-        Features { gray, spec, color }
+        let thumb = thumbnail(&gray, self.w, self.h);
+        Features { gray, spec, color, thumb }
     }
 
-    pub fn score(&self, prev: Option<&Features>, cur: &Features) -> Extent {
+    /// Extent of the action, and whether this frame starts a new shot.
+    pub fn score(&self, prev: Option<&Features>, cur: &Features) -> (Extent, bool) {
         let (w, h) = (self.w, self.h);
         let mut score = cur.color.clone();
+        let cut = prev.is_some_and(|p| is_cut(&p.thumb, &cur.thumb));
+        // Motion across a cut is meaningless (everything "moves").
+        let prev = if cut { None } else { prev };
         if let (Some(spec), Some(prev)) = (&cur.spec, prev) {
             if let Some(prev_spec) = &prev.spec {
                 let (dx, dy) = self.fft.phase_correlate(prev_spec, spec);
@@ -308,12 +358,12 @@ impl Analyser {
         }
         let (x0, x1, total) = extent(&cols, self.cfg.percentile);
         let (y0, y1, _) = extent(&rows, self.cfg.percentile);
-        (x0, x1, y0, y1, total / (w * h) as f64)
+        ((x0, x1, y0, y1, total / (w * h) as f64), cut)
     }
 
     /// Analyse a chunk of consecutive frames in parallel. `carry` is the last
     /// frame of the previous chunk; returns the extents and the new carry.
-    pub fn chunk(&self, carry: Option<Features>, frames: &[Vec<u8>]) -> (Vec<Extent>, Option<Features>) {
+    pub fn chunk(&self, carry: Option<Features>, frames: &[Vec<u8>]) -> (Vec<(Extent, bool)>, Option<Features>) {
         let feats: Vec<Features> = frames.par_iter().map(|f| self.features(f)).collect();
         let extents = (0..feats.len())
             .into_par_iter()
@@ -330,7 +380,7 @@ fn cache_path(info: &VideoInfo, cfg: &TrackingCfg) -> std::path::PathBuf {
     abs.hash(&mut h);
     meta.as_ref().map(|m| m.len()).hash(&mut h);
     meta.and_then(|m| m.modified().ok()).hash(&mut h);
-    format!("{:?}|{:?}|{:?}|v3", cfg.motion_weight, cfg.color_weight, cfg.percentile).hash(&mut h);
+    format!("{:?}|{:?}|{:?}|v4", cfg.motion_weight, cfg.color_weight, cfg.percentile).hash(&mut h);
     paths::workspace().join("cache").join(format!("track_{:016x}.json", h.finish()))
 }
 
@@ -384,6 +434,7 @@ pub fn track_video(path: &str, cfg: &TrackingCfg, progress: &dyn Fn(f32), cancel
     let mut out = child.stdout.take().unwrap();
     let analyser = Analyser::new(aw, ah, cfg.clone());
     let mut rows: Vec<Extent> = vec![];
+    let mut cuts: Vec<usize> = vec![];
     let mut carry = None;
     let expected = (info.duration * info.fps).max(1.0);
     let mut eof = false;
@@ -403,7 +454,12 @@ pub fn track_video(path: &str, cfg: &TrackingCfg, progress: &dyn Fn(f32), cancel
         }
         let (ext, c) = analyser.chunk(carry.take(), &frames);
         carry = c;
-        rows.extend(ext);
+        for (e, cut) in ext {
+            if cut {
+                cuts.push(rows.len());
+            }
+            rows.push(e);
+        }
         progress((rows.len() as f64 / expected).min(0.99) as f32);
     }
     let _ = child.wait();
@@ -421,6 +477,7 @@ pub fn track_video(path: &str, cfg: &TrackingCfg, progress: &dyn Fn(f32), cancel
         center_x: left.iter().zip(&right).map(|(a, b)| (a + b) / 2.0).collect(),
         center_y: top.iter().zip(&bottom).map(|(a, b)| (a + b) / 2.0).collect(),
         strength: rows.iter().map(|r| r.4).collect(),
+        cuts,
         left,
         right,
         top,
@@ -432,6 +489,20 @@ pub fn track_video(path: &str, cfg: &TrackingCfg, progress: &dyn Fn(f32), cancel
     }
     progress(1.0);
     Ok(track)
+}
+
+/// `smooth`, restarted at every shot cut so the camera snaps with the cut
+/// instead of gliding across it.
+pub fn smooth_segments(values: &[f64], sigma_frames: f64, median: usize, cuts: &[usize]) -> Vec<f64> {
+    let mut out = Vec::with_capacity(values.len());
+    let mut start = 0;
+    for &c in cuts.iter().filter(|&&c| c > 0 && c < values.len()).chain(std::iter::once(&values.len())) {
+        if c > start {
+            out.extend(smooth(&values[start..c], sigma_frames, median));
+            start = c;
+        }
+    }
+    out
 }
 
 /// Outlier-robust, zero-phase smoothing: median prefilter + Gaussian.
@@ -504,6 +575,26 @@ mod tests {
         v[20] = 900.0;
         let s = smooth(&v, 2.0, 7);
         assert!(s.iter().all(|x| (x - 100.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn segment_smoothing_snaps_at_cuts() {
+        let mut v = vec![100.0; 40];
+        v.extend(vec![900.0; 40]);
+        let s = smooth_segments(&v, 4.0, 7, &[40]);
+        assert!((s[39] - 100.0).abs() < 1e-6 && (s[40] - 900.0).abs() < 1e-6);
+        let plain = smooth(&v, 4.0, 7);
+        assert!(plain[39] > 150.0, "plain smoothing glides across the cut");
+    }
+
+    #[test]
+    fn cut_detection_ignores_flashes() {
+        let a: Vec<f32> = (0..48 * 27).map(|i| ((i % 48) * 4) as f32).collect();
+        let darker: Vec<f32> = a.iter().map(|v| v * 0.4).collect();
+        let other: Vec<f32> = (0..48 * 27).map(|i| ((i / 48) * 9) as f32).collect();
+        assert!(!is_cut(&a, &darker), "a flash/darkening is not a cut");
+        assert!(is_cut(&a, &other));
+        assert!(!is_cut(&a, &a));
     }
 
     #[test]

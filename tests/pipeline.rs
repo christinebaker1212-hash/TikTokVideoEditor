@@ -9,8 +9,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::OnceLock;
 
 use combo_editor::media::{probe, read_frame};
-use combo_editor::project::{Keyframe, Markers, Project};
-use combo_editor::{render, sync, tracking};
+use combo_editor::project::{Keyframe, MarkerKind, Markers, Project};
+use combo_editor::{detect, render, sync, tracking};
 
 const W: usize = 640;
 const H: usize = 360;
@@ -87,6 +87,10 @@ fn audio(world_start: f64, secs: f64, seed: u64) -> Vec<f32> {
 }
 
 fn encode(path: &Path, start: f64, with_ui: bool, secs: f64, seed: u64) {
+    encode_with(path, start, with_ui, secs, seed, scene)
+}
+
+fn encode_with(path: &Path, start: f64, with_ui: bool, secs: f64, seed: u64, scene: fn(f64, bool) -> Vec<u8>) {
     let wav = path.with_extension("f32");
     let a: Vec<u8> = audio(start, secs, seed).iter().flat_map(|v| v.to_le_bytes()).collect();
     std::fs::write(&wav, a).unwrap();
@@ -224,4 +228,90 @@ fn cli_still_matches_layout() {
     assert!(st.success());
     let info = probe(&png.to_string_lossy()).unwrap();
     assert_eq!((info.width, info.height), (1080, 1920));
+}
+
+// ---------------------------------------------------------------- Super Art
+
+/// Gameplay until 3.0 s, super flash (darkened + frozen) until 3.6 s, a two-shot
+/// cinematic with the HUD hidden until 6.0 s (cut at 4.8 s), then gameplay again.
+fn super_scene(t: f64, with_ui: bool) -> Vec<u8> {
+    if t < 3.0 || t >= 6.0 {
+        return scene(t, with_ui);
+    }
+    if t < 3.6 {
+        // Frozen on the flash frame, background darkened.
+        let mut img = scene(3.0, with_ui);
+        let s = W as f64 / 1920.0;
+        for y in 0..H {
+            for x in 0..W {
+                let in_hud = y < (98.0 * s) as usize && x >= (1040.0 * s) as usize && x < (1755.0 * s) as usize;
+                if !in_hud {
+                    for c in 0..3 {
+                        img[(y * W + x) * 3 + c] = (img[(y * W + x) * 3 + c] as f32 * 0.35) as u8;
+                    }
+                }
+            }
+        }
+        return img;
+    }
+    // Cinematic shots (no HUD in either recording).
+    let shot_b = t >= 4.8;
+    let mut img = vec![0u8; W * H * 3];
+    for y in 0..H {
+        for x in 0..W {
+            let v = if shot_b { ((x / 20) % 2 * 60 + 60) as u8 } else { ((x + y) / 4 % 200) as u8 };
+            img[(y * W + x) * 3..(y * W + x) * 3 + 3].copy_from_slice(&[v, v, v]);
+        }
+    }
+    // A big, saturated, moving character: left in shot A, right in shot B.
+    let cx = if shot_b { 500.0 } else { 220.0 } + 10.0 * (t * 6.0).sin();
+    for y in 60..330 {
+        for x in (cx as usize - 60)..(cx as usize + 60) {
+            img[(y * W + x) * 3..(y * W + x) * 3 + 3].copy_from_slice(&[220, 60 + ((t * 40.0) as u8 % 40), 40]);
+        }
+    }
+    img
+}
+
+#[test]
+fn detects_super_art_and_recentres_on_cuts() {
+    let m = media();
+    let dir = m.dir.join("super");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (clean, ui) = (dir.join("clean.mp4"), dir.join("ui.mp4"));
+    encode_with(&clean, UI_LEAD, false, 7.5, 1, super_scene);
+    encode_with(&ui, 0.0, true, 8.0, 2, super_scene);
+    let mut p = Project::default();
+    p.sources.clean = clean.to_string_lossy().into_owned();
+    p.sources.ui = ui.to_string_lossy().into_owned();
+    p.sync.offset = UI_LEAD;
+
+    let d = detect::detect(&p, &|_| {}, &AtomicBool::new(false)).unwrap();
+    let f = 1.0 / FPS;
+    // In clean time everything is UI_LEAD earlier than in "world" time.
+    assert!((d.super_start - 2.5).abs() <= 2.0 * f, "super start {}", d.super_start);
+    assert!((d.anim_start - 3.1).abs() <= 1.5 * f, "anim start {}", d.anim_start);
+    assert!((d.post_start - 5.5).abs() <= 1.5 * f, "post start {}", d.post_start);
+    assert!(d.startup_found && d.confidence > 0.6, "{d:?}");
+    for c in [3.1, 4.3, 5.5] {
+        assert!(d.cuts.iter().any(|x| (x - c).abs() <= 1.5 * f), "missing cut at {c}: {:?}", d.cuts);
+    }
+
+    // Auto-centring during the cinematic follows the character from shot to shot.
+    p.timeline.set(MarkerKind::SuperStart, Some(d.super_start));
+    p.timeline.set(MarkerKind::AnimStart, Some(d.anim_start));
+    p.timeline.set(MarkerKind::PostStart, Some(d.post_start));
+    p.camera.super_.startup_auto = true;
+    p.camera.super_.animation_auto = true;
+    let tr = tracking::track_video(&p.sources.clean, &Default::default(), &|_| {}, &AtomicBool::new(false)).unwrap();
+    for c in [3.1, 4.3, 5.5] {
+        assert!(tr.cuts.iter().any(|&i| (i as f64 / FPS - c).abs() <= 1.5 * f), "tracking missed cut at {c}: {:?}", tr.cuts);
+    }
+    let info = probe(&p.sources.clean).unwrap();
+    let tl = combo_editor::camera::build_timeline(&p, Some(&tr), FPS, info.width as f64, info.height as f64, info.duration);
+    let (a, b) = (tl.sample(3.7).cam.cx, tl.sample(5.0).cam.cx);
+    assert!((a - 220.0).abs() < 40.0, "shot A centre {a}");
+    assert!((b - 500.0).abs() < 40.0, "shot B centre {b}");
+    // Right after the cut the camera is already on the new shot (no glide).
+    assert!((tl.sample(4.3 + 2.0 * f).cam.cx - 500.0).abs() < 60.0);
 }

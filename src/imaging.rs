@@ -332,6 +332,56 @@ pub fn crop_scale(frame: &YuvFrame, x0: f64, y0: f64, scale_x: f64, scale_y: f64
     resample(&region, ax.min, ay.min, &ax, &ay)
 }
 
+/// Bilinear resize of an RGB image (used to enlarge a tiny, blurred background).
+pub fn resize_bilinear(src: &ImageF, w: usize, h: usize) -> ImageF {
+    let mut out = ImageF::new(w, h);
+    let (sx, sy) = (src.w as f32 / w as f32, src.h as f32 / h as f32);
+    out.data.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
+        let fy = ((y as f32 + 0.5) * sy - 0.5).clamp(0.0, (src.h - 1) as f32);
+        let (y0, ay) = (fy as usize, fy.fract());
+        let y1 = (y0 + 1).min(src.h - 1);
+        for x in 0..w {
+            let fx = ((x as f32 + 0.5) * sx - 0.5).clamp(0.0, (src.w - 1) as f32);
+            let (x0, ax) = (fx as usize, fx.fract());
+            let x1 = (x0 + 1).min(src.w - 1);
+            for c in 0..3 {
+                let p = |xx: usize, yy: usize| src.data[(yy * src.w + xx) * 3 + c];
+                let top = p(x0, y0) + (p(x1, y0) - p(x0, y0)) * ax;
+                let bot = p(x0, y1) + (p(x1, y1) - p(x0, y1)) * ax;
+                row[x * 3 + c] = top + (bot - top) * ay;
+            }
+        }
+    });
+    out
+}
+
+/// In-place box blur (radius `r`, two passes approximate a Gaussian).
+pub fn box_blur(img: &mut ImageF, r: usize) {
+    let (w, h) = (img.w, img.h);
+    for _ in 0..2 {
+        let src = img.data.clone();
+        for y in 0..h {
+            for x in 0..w {
+                let mut acc = [0.0f32; 3];
+                let mut n = 0.0;
+                for yy in y.saturating_sub(r)..(y + r + 1).min(h) {
+                    for xx in x.saturating_sub(r)..(x + r + 1).min(w) {
+                        let i = (yy * w + xx) * 3;
+                        acc[0] += src[i];
+                        acc[1] += src[i + 1];
+                        acc[2] += src[i + 2];
+                        n += 1.0;
+                    }
+                }
+                let i = (y * w + x) * 3;
+                img.data[i] = acc[0] / n;
+                img.data[i + 1] = acc[1] / n;
+                img.data[i + 2] = acc[2] / n;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

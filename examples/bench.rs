@@ -19,6 +19,6 @@ fn main() {
     };
     time("yuv_region 608x1080", 30, Box::new(|| { yuv_region(&f, 656, 0, 608, 1080); }));
     time("crop_scale -> 414x736 lin", 30, Box::new(|| { crop_scale(&f, 656.0, 0.0, 736.0/1080.0, 736.0/1080.0, 414, 736, Filter::Linear); }));
-    time("compose preview 414x736", 30, Box::new(|| { compose(&f, Some(&f), &fc, &skin, 1080.0, 414, 736, Filter::Linear).to_rgba8(); }));
-    time("compose export lanczos", 10, Box::new(|| { compose(&f, Some(&f), &fc, &skin, 1080.0, 1080, 1920, Filter::Lanczos3).to_yuv420(); }));
+    time("compose preview 414x736", 30, Box::new(|| { compose(&f, Some(&f), &fc, &skin, 1080.0, 414, 736, Filter::Linear, true).to_rgba8(); }));
+    time("compose export lanczos", 10, Box::new(|| { compose(&f, Some(&f), &fc, &skin, 1080.0, 1080, 1920, Filter::Lanczos3, true).to_yuv420(); }));
 }

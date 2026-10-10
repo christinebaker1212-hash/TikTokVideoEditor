@@ -16,7 +16,8 @@ use egui::{Context, Key};
 use combo_editor::camera::{build_timeline, Timeline};
 use combo_editor::imaging::ImageF;
 use combo_editor::media::{load_audio, probe, VideoInfo};
-use combo_editor::project::{MarkerKind, Part, Project};
+use combo_editor::detect::{self, Detection};
+use combo_editor::project::{Keyframe, MarkerKind, Markers, Part, Project};
 use combo_editor::sync::SyncResult;
 use combo_editor::tracking::{self, Track};
 use combo_editor::{paths, presets, render, sync};
@@ -75,6 +76,7 @@ struct Jobs {
     track: Option<Job<Track>>,
     export: Option<Job<PathBuf>>,
     still: Option<Job<ImageF>>,
+    detect: Option<Job<Detection>>,
     game_audio: Option<Job<Vec<f32>>>,
     music_audio: Option<Job<Vec<f32>>>,
     waveform: Option<Job<Vec<f32>>>,
@@ -104,6 +106,9 @@ pub struct EditorApp {
     track: Option<Arc<Track>>,
     waveform: Option<Vec<f32>>,
     envelopes: Option<(Vec<f32>, Vec<f32>)>,
+    pub detection: Option<Detection>,
+    /// Markers and auto flags from before the last detection, for Undo.
+    undo_detect: Option<(Markers, bool, bool)>,
 
     dec_clean: Option<Decoder>,
     dec_ui: Option<Decoder>,
@@ -196,6 +201,8 @@ impl EditorApp {
             track: None,
             waveform: None,
             envelopes: None,
+            detection: None,
+            undo_detect: None,
             dec_clean: None,
             dec_ui: None,
             audio: Audio::new(),
@@ -330,6 +337,10 @@ impl EditorApp {
             Ok(x.chunks(80).map(|c| c.iter().fold(0f32, |m, v| m.max(v.abs()))).collect())
         }));
         self.rebuild_timeline();
+        // Framing depends on knowing where the fighters are: analyse right away.
+        if self.track.is_none() && self.jobs.track.is_none() {
+            self.start_track(ctx);
+        }
         self.t = self.t.clamp(0.0, self.duration());
         if self.status.as_ref().is_none_or(|s| !s.2) {
             self.set_status("Videos loaded", false);
@@ -361,7 +372,7 @@ impl EditorApp {
     }
 
     /// Detect edits by comparing with the last snapshot.
-    fn detect_changes(&mut self) {
+    pub fn detect_changes(&mut self) {
         if self.project == self.snapshot {
             if let Some(at) = self.changed_at {
                 if at.elapsed().as_secs_f32() > 1.0 {
@@ -445,6 +456,12 @@ impl EditorApp {
                 Err(e) => self.set_status(format!("Sync failed: {e:#}"), true),
             }
         }
+        if let Some(r) = jobs::take(&mut self.jobs.detect) {
+            match r {
+                Ok(d) => self.apply_detection(d),
+                Err(e) => self.set_status(format!("Super Art detection: {e:#}"), true),
+            }
+        }
         if let Some(r) = jobs::take(&mut self.jobs.track) {
             match r {
                 Ok(t) => {
@@ -485,6 +502,107 @@ impl EditorApp {
             return self.set_status("Load both videos first", true);
         }
         self.jobs.sync = Some(Job::spawn(ctx, move |_, _| sync::sync_files(&ui, &clean, 60.0)));
+    }
+
+    pub fn start_detect(&mut self, ctx: &Context) {
+        if self.project.sources.ui.is_empty() || self.clean.is_none() {
+            return self.set_status("Load both videos (and sync them) first", true);
+        }
+        let project = self.project.clone();
+        self.jobs.detect = Some(Job::spawn(ctx, move |p, cancel| detect::detect(&project, &|f| p(f, "Looking for the Super Art"), cancel)));
+        // Shot cuts come from the fighter analysis; run it too if needed.
+        if self.track.is_none() && self.jobs.track.is_none() {
+            self.start_track(ctx);
+        }
+    }
+
+    fn apply_detection(&mut self, d: Detection) {
+        let sc = &self.project.camera.super_;
+        self.undo_detect = Some((self.project.timeline.clone(), sc.startup_auto, sc.animation_auto));
+        let snap4 = |t: f64| (t * 10000.0).round() / 10000.0;
+        let tl = &mut self.project.timeline;
+        tl.super_start = Some(snap4(d.super_start));
+        tl.anim_start = Some(snap4(d.anim_start));
+        tl.post_start = Some(snap4(d.post_start));
+        if tl.out.is_some_and(|o| o < d.post_start) {
+            tl.out = None;
+        }
+        self.project.camera.super_.startup_auto = true;
+        self.project.camera.super_.animation_auto = true;
+        let note = if d.startup_found { "" } else { " (startup estimated: no flash found, check it)" };
+        self.set_status(
+            format!(
+                "Super Art found: startup {:.2} s, cinematic {:.2}–{:.2} s · confidence {:.0}%{note}",
+                d.super_start, d.anim_start, d.post_start, d.confidence * 100.0
+            ),
+            !d.startup_found,
+        );
+        self.seek(d.super_start);
+        self.detection = Some(d);
+    }
+
+    pub fn undo_detection(&mut self) {
+        if let Some((m, a, b)) = self.undo_detect.take() {
+            self.project.timeline = m;
+            self.project.camera.super_.startup_auto = a;
+            self.project.camera.super_.animation_auto = b;
+            self.detection = None;
+            self.set_status("Detection undone", false);
+        }
+    }
+
+    /// Shot cuts in seconds (from the fighter analysis, or the detection).
+    pub fn cut_times(&self) -> Vec<f64> {
+        match (&self.track, &self.detection) {
+            (Some(t), _) if t.fps > 0.0 => t.cuts.iter().map(|&c| c as f64 / t.fps).collect(),
+            (_, Some(d)) => d.cuts.clone(),
+            _ => vec![],
+        }
+    }
+
+    /// Turn the auto-centred camera of the chosen super parts into editable keyframes.
+    pub fn bake_keyframes(&mut self, startup: bool, animation: bool) {
+        let Some(tl) = self.timeline.clone() else { return };
+        let m = tl.markers;
+        let f = 1.0 / tl.fps;
+        let mut ranges = vec![];
+        if startup && self.project.camera.super_.startup_auto {
+            ranges.push((m.super_start, m.anim_start));
+        }
+        if animation && self.project.camera.super_.animation_auto {
+            ranges.push((m.anim_start, m.post_start));
+        }
+        if ranges.is_empty() {
+            return;
+        }
+        let cuts = self.cut_times();
+        let key = |t: f64| {
+            let c = tl.sample(t).cam;
+            Keyframe { t: (t * 10000.0).round() / 10000.0, cx: (c.cx * 10.0).round() / 10.0, cy: (c.cy * 10.0).round() / 10.0, zoom: (c.zoom * 1000.0).round() / 1000.0, ease: Some("linear".into()) }
+        };
+        let keys = &mut self.project.camera.super_.keyframes;
+        keys.retain(|k| !ranges.iter().any(|(s, e)| k.t >= *s && k.t < *e));
+        for (s, e) in ranges {
+            let mut t = s;
+            while t < e - 0.5 * f {
+                keys.push(key(t));
+                t += 0.25;
+            }
+            // Two keys around each cut make the camera jump with the cut.
+            for &c in cuts.iter().filter(|&&c| c > s + f && c < e) {
+                keys.push(key(c - f));
+                keys.push(key(c));
+            }
+        }
+        keys.sort_by(|a, b| a.t.total_cmp(&b.t));
+        keys.dedup_by(|a, b| (a.t - b.t).abs() < 0.5 * f);
+        if startup {
+            self.project.camera.super_.startup_auto = false;
+        }
+        if animation {
+            self.project.camera.super_.animation_auto = false;
+        }
+        self.set_status("Auto camera baked into keyframes: drag the preview to adjust", false);
     }
 
     pub fn start_track(&mut self, ctx: &Context) {
@@ -588,6 +706,8 @@ impl EditorApp {
                     self.project_path = Some(path);
                     self.selected = self.project.overlay.elements.first().map(|e| e.id.clone());
                     self.envelopes = None;
+                    self.detection = None;
+                    self.undo_detect = None;
                     self.load_sources(ctx);
                 }
                 Err(e) => self.set_status(format!("Could not open project: {e:#}"), true),
@@ -596,6 +716,8 @@ impl EditorApp {
     }
 
     pub fn new_project(&mut self, ctx: &Context) {
+        self.detection = None;
+        self.undo_detect = None;
         self.project = Project::default();
         self.project_path = None;
         self.envelopes = None;
@@ -693,7 +815,7 @@ impl eframe::App for EditorApp {
         self.handle_keys(&ctx);
         self.request_frames();
         // Keep the progress bars moving.
-        if self.jobs.export.is_some() || self.jobs.track.is_some() || self.jobs.sync.is_some() {
+        if self.jobs.export.is_some() || self.jobs.track.is_some() || self.jobs.sync.is_some() || self.jobs.detect.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
 

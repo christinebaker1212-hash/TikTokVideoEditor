@@ -334,15 +334,31 @@ impl Default for Keyframe {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct SuperCam {
     pub easing: String,
     pub keyframes: Vec<Keyframe>,
+    /// Keep following the fighters during the startup (instead of keyframes).
+    pub startup_auto: bool,
+    /// Auto-centre during the cinematic, re-centring at every shot cut.
+    pub animation_auto: bool,
+    /// Auto cinematic: hold one framing per shot, centred on the whole animation
+    /// (otherwise follow the action within the shot, smoothed by `smoothing`).
+    pub animation_hold: bool,
+    /// Smoothing (s) of the following cinematic camera.
+    pub smoothing: f64,
 }
 
 impl Default for SuperCam {
     fn default() -> Self {
-        SuperCam { easing: "easeInOut".into(), keyframes: vec![] }
+        SuperCam {
+            easing: "easeInOut".into(),
+            keyframes: vec![],
+            startup_auto: false,
+            animation_auto: false,
+            animation_hold: true,
+            smoothing: 0.25,
+        }
     }
 }
 
@@ -374,9 +390,28 @@ impl Default for Transitions {
     }
 }
 
+/// Gameplay framing rules (combo, auto startup, post super).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Framing {
+    /// Zoom out when the fighters are too far apart for the 9:16 crop.
+    pub keep_both: bool,
+    /// Extra room kept around the fighters (source pixels).
+    pub margin: f64,
+    /// What fills the space above/below the picture when zoomed out: "blur" or "black".
+    pub fill: String,
+}
+
+impl Default for Framing {
+    fn default() -> Self {
+        Framing { keep_both: true, margin: 60.0, fill: "blur".into() }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CameraCfg {
+    pub framing: Framing,
     pub combo: ComboCam,
     #[serde(rename = "super")]
     pub super_: SuperCam,

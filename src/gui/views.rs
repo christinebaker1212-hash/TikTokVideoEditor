@@ -142,7 +142,8 @@ impl EditorApp {
             if self.preview_tex.as_ref().is_none_or(|(_, k)| *k != key) {
                 let fc = self.frame_cam();
                 let started = std::time::Instant::now();
-                let img = compose(clean, ui_f.as_ref().map(|u| &*u.1), &fc, &self.project.overlay, self.src_size().1, w, h, Filter::Linear);
+                let blur = self.project.camera.framing.fill != "black";
+                let img = compose(clean, ui_f.as_ref().map(|u| &*u.1), &fc, &self.project.overlay, self.src_size().1, w, h, Filter::Linear, blur);
                 let ci = egui::ColorImage::from_rgba_unmultiplied([w, h], &img.to_rgba8());
                 self.stats.compose_ms = started.elapsed().as_secs_f32() * 1000.0;
                 self.stats.composed += 1;
@@ -381,9 +382,16 @@ impl EditorApp {
     /// Create or update the keyframe at the playhead (only inside the super).
     pub fn edit_keyframe(&mut self, f: impl FnOnce(Cam) -> Cam) {
         let t = self.snap(self.t);
-        if !self.part_at(t).is_super() {
+        let part = self.part_at(t);
+        if !part.is_super() {
             self.set_status("Move the playhead into the Super Art section (set its markers first)", true);
             return;
+        }
+        // Editing an auto-centred part turns its path into keyframes first.
+        let sc = &self.project.camera.super_;
+        if (part == Part::Startup && sc.startup_auto) || (part == Part::Animation && sc.animation_auto) {
+            self.bake_keyframes(part == Part::Startup, part == Part::Animation);
+            self.detect_changes();
         }
         let fps = self.fps();
         let current = self.frame_cam().cam;
@@ -521,6 +529,28 @@ impl EditorApp {
             let x = x_of(t);
             p.vline(x, rect.top() + 16.0..=rect.bottom(), Stroke::new(2.0, color));
             p.text(pos2(x + 4.0, rect.bottom() - 3.0), Align2::LEFT_BOTTOM, k.label(), FontId::proportional(10.0), color);
+        }
+        // HUD presence (from the Super Art detection) and shot cuts.
+        if let Some(d) = &self.detection {
+            let n = d.hud.len();
+            let mut i = 0;
+            while i < n {
+                let on = d.hud[i];
+                let s = i;
+                while i < n && d.hud[i] == on {
+                    i += 1;
+                }
+                if on {
+                    let (x0, x1) = (x_of(s as f64 / d.fps), x_of(i as f64 / d.fps));
+                    p.rect_filled(Rect::from_min_max(pos2(x0, rect.top() + 21.0), pos2(x1, rect.top() + 25.0)), 0.0, Color32::from_white_alpha(210));
+                }
+            }
+        }
+        for c in self.cut_times() {
+            if c >= a && c <= b {
+                let x = x_of(c);
+                p.vline(x, rect.top() + 40.0..=rect.top() + 58.0, Stroke::new(1.5, Color32::from_rgb(0xff, 0xd8, 0x4d)));
+            }
         }
         // Keyframes.
         for kf in &self.project.camera.super_.keyframes {

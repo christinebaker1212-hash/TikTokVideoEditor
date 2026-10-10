@@ -226,12 +226,37 @@ impl EditorApp {
                 if ui.add(primary("Analyse fighters")).clicked() {
                     self.start_track(&ctx);
                 }
-                let txt = if self.track.is_some() { "Tracked" } else { "Not analysed yet: using the frame centre" };
+                let txt = if self.track.is_some() { "Tracked (runs automatically when videos load)" } else { "Not analysed: using the frame centre" };
                 ui.label(RichText::new(txt).color(MUTED));
             });
         }
 
         heading(ui, "Parts");
+        if let Some(job) = &self.jobs.detect {
+            let p = job.progress();
+            let mut cancel = false;
+            progress_row(ui, (p.0, "Looking for the Super Art".into()), || cancel = true);
+            if cancel {
+                job.cancel();
+            }
+        } else {
+            ui.horizontal(|ui| {
+                if ui.add(primary("Detect Super Art")).on_hover_text("Finds the super flash and the cinematic (where the HUD disappears) and sets the markers").clicked() {
+                    self.start_detect(&ctx);
+                }
+                if self.undo_detect.is_some() && ui.button("Undo").clicked() {
+                    self.undo_detection();
+                }
+            });
+        }
+        if let Some(d) = &self.detection {
+            let txt = format!(
+                "Found: startup {}, cinematic {} to {} · {:.0}% confidence{}",
+                fmt_time(d.super_start), fmt_time(d.anim_start), fmt_time(d.post_start), d.confidence * 100.0,
+                if d.startup_found { "" } else { " · startup estimated" }
+            );
+            ui.label(RichText::new(txt).size(12.0).color(if d.startup_found { MUTED } else { ERROR }));
+        }
         egui::Grid::new("markers").num_columns(5).spacing([6.0, 4.0]).show(ui, |ui| {
             for k in MarkerKind::ALL {
                 let color = match k {
@@ -265,13 +290,47 @@ impl EditorApp {
             }
         });
 
+        heading(ui, "Framing (gameplay)");
+        {
+            let f = &mut self.project.camera.framing;
+            ui.checkbox(&mut f.keep_both, "Always keep both fighters in frame")
+                .on_hover_text("Native scale normally; zooms out only when the fighters are too far apart for the 9:16 crop");
+            if f.keep_both {
+                ui.add(Slider::new(&mut f.margin, 0.0..=250.0).text("margin around fighters (px)"));
+                ui.horizontal(|ui| {
+                    ui.label("When zoomed out, fill above/below with");
+                    ui.radio_value(&mut f.fill, "blur".to_string(), "blurred gameplay");
+                    ui.radio_value(&mut f.fill, "black".to_string(), "black");
+                });
+            }
+        }
+
         heading(ui, "Combo — auto centre");
         let c = &mut self.project.camera.combo;
         ui.add(Slider::new(&mut c.offset_x, -400.0..=400.0).text("offset X (px)"));
         ui.add(Slider::new(&mut c.smoothing, 0.0..=2.0).text("smoothing (s)"));
 
-        heading(ui, "Super Art — manual");
-        hint(ui, "Move the playhead into the super, then drag the preview to pan and scroll to zoom. A keyframe is created or updated at the playhead. The camera starts where the combo camera was.");
+        heading(ui, "Super Art");
+        {
+            let sc = &mut self.project.camera.super_;
+            ui.checkbox(&mut sc.startup_auto, "Auto startup: keep both fighters in frame");
+            ui.checkbox(&mut sc.animation_auto, "Auto cinematic: centre on the animation, re-centre at every cut");
+            if sc.animation_auto {
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut sc.animation_hold, true, "Steady per shot")
+                        .on_hover_text("One framing per shot, centred on the whole animation in it");
+                    ui.radio_value(&mut sc.animation_hold, false, "Follow the action");
+                });
+                if !sc.animation_hold {
+                    ui.add(Slider::new(&mut sc.smoothing, 0.0..=1.5).text("follow smoothing (s)"));
+                }
+            }
+        }
+        let any_auto = self.project.camera.super_.startup_auto || self.project.camera.super_.animation_auto;
+        if ui.add_enabled(any_auto, egui::Button::new("Bake to keyframes")).on_hover_text("Turn the auto camera into keyframes you can adjust").clicked() {
+            self.bake_keyframes(true, true);
+        }
+        hint(ui, "Manual parts: move the playhead into the super, then drag the preview to pan and scroll to zoom. A keyframe is created or updated at the playhead. Dragging inside an auto part bakes it first.");
         ui.horizontal(|ui| {
             ui.label("Easing");
             let e = &mut self.project.camera.super_.easing;

@@ -5,7 +5,7 @@
 use anyhow::{bail, Result};
 use std::sync::atomic::AtomicBool;
 
-use combo_editor::{paths, project::Project, render, sync, tracking};
+use combo_editor::{detect, paths, project::Project, render, sync, tracking};
 
 mod gui;
 mod icon;
@@ -16,6 +16,7 @@ USAGE:
   combo-editor [PROJECT.json]                       open the editor
   combo-editor export PROJECT.json [-o OUT.mp4]     render a project without the GUI
   combo-editor still PROJECT.json SECONDS OUT.png   render one frame exactly as exported
+  combo-editor detect PROJECT.json [--write]        find the Super Art; --write saves the markers
   combo-editor sync UI_VIDEO CLEAN_VIDEO            print the audio offset (ui = clean + offset)
   combo-editor track CLEAN_VIDEO                    analyse fighter positions (cached)
 ";
@@ -56,6 +57,26 @@ fn cli(args: &[String]) -> Result<()> {
             let img = render::render_still(&project, &prepared, t.parse()?)?;
             render::save_png(&img, out)?;
         }
+        "detect" => {
+            let Some(path) = args.get(1) else { bail!(USAGE) };
+            let mut project = Project::load(path.as_ref())?;
+            let d = detect::detect(&project, &|f| eprint!("\r{:3}%", (f * 100.0) as i32), &cancel)?;
+            eprintln!();
+            println!(
+                "super start {:.3} s\nanimation start {:.3} s\npost start {:.3} s\nconfidence {:.0}%{}",
+                d.super_start, d.anim_start, d.post_start, d.confidence * 100.0,
+                if d.startup_found { "" } else { " (startup estimated)" }
+            );
+            if args.iter().any(|a| a == "--write") {
+                project.timeline.super_start = Some(d.super_start);
+                project.timeline.anim_start = Some(d.anim_start);
+                project.timeline.post_start = Some(d.post_start);
+                project.camera.super_.startup_auto = true;
+                project.camera.super_.animation_auto = true;
+                project.save(path.as_ref())?;
+                println!("markers written to {path}");
+            }
+        }
         "sync" => {
             let (Some(ui), Some(clean)) = (args.get(1), args.get(2)) else { bail!(USAGE) };
             let r = sync::sync_files(ui, clean, 60.0)?;
@@ -75,7 +96,7 @@ fn cli(args: &[String]) -> Result<()> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let is_cli = args.first().is_some_and(|a| ["export", "still", "sync", "track", "-h", "--help", "help"].contains(&a.as_str()));
+    let is_cli = args.first().is_some_and(|a| ["export", "still", "detect", "sync", "track", "-h", "--help", "help"].contains(&a.as_str()));
     if is_cli {
         attach_console();
         if let Err(e) = cli(&args) {

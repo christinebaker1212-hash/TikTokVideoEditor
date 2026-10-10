@@ -2,7 +2,7 @@
 //! The preview uses this same code at screen size, the export at 1080x1920.
 
 use crate::camera::{crop_size, FrameCam};
-use crate::imaging::{crop_scale, Filter, ImageF};
+use crate::imaging::{box_blur, crop_scale, resize_bilinear, Filter, ImageF};
 use crate::media::YuvFrame;
 use crate::project::{Element, Feather, Skin, OUT_W};
 
@@ -70,8 +70,25 @@ pub fn draw_element(out: &mut ImageF, ui: &YuvFrame, el: &Element, alpha: f32, r
     }
 }
 
+/// Soft, darkened, full-height crop around `cx` (frame pixels): the fill
+/// behind a zoomed-out picture.
+fn blurred_background(clean: &YuvFrame, cx: f64, out_w: usize, out_h: usize) -> ImageF {
+    let (sw, sh) = ((out_w / 24).max(4), (out_h / 24).max(4));
+    let cw = (clean.h as f64 * sw as f64 / sh as f64).min(clean.w as f64);
+    let x0 = (cx - cw / 2.0).clamp(0.0, clean.w as f64 - cw);
+    let s = sh as f64 / clean.h as f64;
+    let mut small = crop_scale(clean, x0, 0.0, s, s, sw, sh, Filter::Cubic);
+    box_blur(&mut small, 2);
+    for v in &mut small.data {
+        *v *= 0.45;
+    }
+    resize_bilinear(&small, out_w, out_h)
+}
+
 /// Compose a frame. Camera coordinates are in clean-source pixels (`src_w` x `src_h`);
-/// the decoded frames may be smaller (half-resolution preview).
+/// the decoded frames may be smaller (half-resolution preview). Below zoom 1
+/// the whole source height is shown, shrunk, over a blurred (or black) fill.
+#[allow(clippy::too_many_arguments)]
 pub fn compose(
     clean: &YuvFrame,
     ui: Option<&YuvFrame>,
@@ -81,13 +98,23 @@ pub fn compose(
     out_w: usize,
     out_h: usize,
     filter: Filter,
+    blur_fill: bool,
 ) -> ImageF {
     let k = clean.h as f64 / src_h;
     let (cw, ch) = crop_size(fc.cam.zoom, src_h);
     let x0 = (fc.cam.cx - cw / 2.0) * k;
-    let y0 = (fc.cam.cy - ch / 2.0) * k;
     let scale = out_h as f64 / (ch * k);
-    let mut out = crop_scale(clean, x0, y0, scale, scale, out_w, out_h, filter);
+    let mut out = if fc.cam.zoom < 1.0 - 1e-9 {
+        let mut out = if blur_fill { blurred_background(clean, fc.cam.cx * k, out_w, out_h) } else { ImageF::new(out_w, out_h) };
+        let fg_h = ((clean.h as f64 * scale).round() as usize).clamp(1, out_h);
+        let fg = crop_scale(clean, x0, 0.0, scale, scale, out_w, fg_h, filter);
+        let top = (out_h - fg_h) / 2;
+        out.data[top * out_w * 3..(top + fg_h) * out_w * 3].copy_from_slice(&fg.data);
+        out
+    } else {
+        let y0 = (fc.cam.cy - ch / 2.0) * k;
+        crop_scale(clean, x0, y0, scale, scale, out_w, out_h, filter)
+    };
     if let Some(ui) = ui {
         for el in &skin.elements {
             if el.enabled {
@@ -146,9 +173,24 @@ mod tests {
         let ui = frame_with_bar();
         let fc = FrameCam { cam: Cam { cx: 1400.0, cy: 540.0, zoom: 1.0 }, part: Part::Combo, alphas: HashMap::new() };
         // Camera centred on the bar: the bar (rows 52..98) appears at the top of the output.
-        let out = compose(&ui, None, &fc, &Skin::default(), 1080.0, 1080, 1920, Filter::Cubic);
+        let out = compose(&ui, None, &fc, &Skin::default(), 1080.0, 1080, 1920, Filter::Cubic, true);
         let row = (75.0 * 1920.0 / 1080.0) as usize;
         assert!(out.px(540, row)[0] > 200.0);
         assert!(out.px(540, 1000)[0] < 5.0);
+    }
+
+    #[test]
+    fn zoomed_out_shows_full_height_over_fill() {
+        let frame = frame_with_bar();
+        // Crop as wide as the source: the 1920x1080 picture becomes 1080x607.5 in the middle.
+        let fc = FrameCam { cam: Cam { cx: 960.0, cy: 540.0, zoom: 1080.0 * 0.5625 / 1920.0 }, part: Part::Combo, alphas: HashMap::new() };
+        let out = compose(&frame, None, &fc, &Skin::default(), 1080.0, 1080, 1920, Filter::Cubic, false);
+        let top = (1920 - 608) / 2;
+        // The bar (source rows 52..98, x 1040..1755) lands at the matching place in the band.
+        let y = top + (75.0 * 1080.0 / 1920.0) as usize;
+        let x = (1400.0 * 1080.0 / 1920.0) as usize;
+        assert!(out.px(x, y)[0] > 200.0, "{:?}", out.px(x, y));
+        assert_eq!(out.px(540, 100), [0.0, 0.0, 0.0], "black fill above");
+        assert_eq!(out.px(540, 1850), [0.0, 0.0, 0.0], "black fill below");
     }
 }

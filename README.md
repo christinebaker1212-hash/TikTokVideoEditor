@@ -34,18 +34,29 @@ projects and exports stay in that folder, so you can move or back up the app by 
    points under the timeline (keys `I` / `O`).
 
 ### 2. Camera
-Click **Analyse fighters** once per clip, then set the part markers under the timeline:
+The fighters are analysed automatically when the videos load. Then click **Detect Super Art**. It finds the cinematic (the stretch where the HUD disappears from
+the UI recording) and the super flash before it, then sets all three part markers and turns
+on auto-centring. A thin white strip on the timeline shows where the HUD was found, and
+yellow ticks mark shot cuts. **Undo** restores your previous markers. You can also set or
+drag the markers by hand:
 
 | Part | Markers | Camera |
 |---|---|---|
-| Combo | In → Super start | Automatic: always centred on both fighters, at native scale (full-height 9:16 crop) |
-| Super startup | Super start → Animation start | Manual keyframes |
-| Super animation | Animation start → Post start | Manual keyframes |
-| Post super | Post start → Out | Automatic centring, plus your offset, zoom and smoothing |
+| Combo | In → Super start | Automatic: both fighters always in frame |
+| Super startup | Super start → Animation start | Auto (both fighters in frame) or manual keyframes |
+| Super animation | Animation start → Post start | Auto (one steady framing per shot, centred on the animation, re-centred at every cut) or manual keyframes |
+| Post super | Post start → Out | Automatic (both fighters in frame), plus your offset, zoom and smoothing |
 
-In the super, **drag the preview** to pan or **scroll** to zoom. Each change creates or
-updates a keyframe at the playhead (`K` adds one). Keyframes can be dragged along the
-timeline.
+**Gameplay framing.** The camera works at native scale (a full-height 9:16 crop, with the
+gameplay never shrunk) whenever both fighters fit. When they are too far apart, it zooms out
+smoothly, just enough to keep both in frame with a margin. The space above and below then
+fills with blurred gameplay, or black. Offsets can never push a fighter out of frame. You can
+turn the rule off under **Framing**.
+
+In a manual part, **drag the preview** to pan or **scroll** to zoom. Each change creates or
+updates a keyframe at the playhead (`K` adds one), and keyframes can be dragged along the
+timeline. **Bake to keyframes** turns the auto camera into keyframes you can fine-tune.
+Dragging inside an auto part bakes it automatically.
 
 ### 3. UI overlay
 Each element has a **source** box (on the UI recording) and a **placement** box (on the
@@ -68,6 +79,7 @@ TikTok frame). You can drag both or type exact values.
 ```
 ComboEditor.exe export project.json [-o out.mp4]   # render a saved project without the GUI
 ComboEditor.exe still project.json 12.5 frame.png  # one export-identical frame
+ComboEditor.exe detect project.json --write        # find the Super Art and save the markers
 ComboEditor.exe sync with_ui.mp4 clean.mp4         # print the sync offset
 ```
 
@@ -78,6 +90,7 @@ ComboEditor.exe sync with_ui.mp4 clean.mp4         # print the sync offset
 | `src/media.rs` | ffmpeg/ffprobe I/O; all video is normalised to 8-bit BT.709 yuv420p |
 | `src/sync.rs` | Onset-envelope cross-correlation, then GCC-PHAT refinement |
 | `src/tracking.rs` | Per-frame fighter extents from camera-shift-compensated motion (phase correlation) plus saturation; parallel and cached |
+| `src/detect.rs` | Super Art detection: HUD disappearance (UI vs clean), super flash (darkening/freeze), shot cuts |
 | `src/camera.rs` | Markers + tracking + keyframes → per-frame camera path and overlay visibility |
 | `src/imaging.rs` | YUV↔RGB, separable Lanczos/bicubic resampler, fast bilinear preview path |
 | `src/compositor.rs` | Crop + feathered UI elements, shared by the preview and the export |

@@ -51,7 +51,7 @@ pub fn render_still(project: &Project, p: &Prepared, t: f64) -> Result<ImageF> {
     };
     let fc = p.timeline.sample(t);
     Ok(compose(&clean, ui.as_deref(), &fc, &project.overlay, p.clean.height as f64, OUT_W as usize, OUT_H as usize,
-        Filter::from_name(&project.export.scaler)))
+        Filter::from_name(&project.export.scaler), project.camera.framing.fill != "black"))
 }
 
 /// Write an RGB image as PNG (via ffmpeg, which is bundled anyway).
@@ -193,6 +193,7 @@ pub fn export(project: &Project, output: &str, track: Option<&Track>, progress: 
     });
 
     let filter = Filter::from_name(&ex.scaler);
+    let blur_fill = project.camera.framing.fill != "black";
     let skin = &project.overlay;
     let src_h = p.clean.height as f64;
     let mut result: Result<()> = Ok(());
@@ -206,7 +207,7 @@ pub fn export(project: &Project, output: &str, track: Option<&Track>, progress: 
             Some(rx) => Some(rx.recv().map_err(|_| anyhow!("decoder stopped"))?),
             None => None,
         };
-        let img = compose(&clean, ui.as_deref(), &tl.frame(i), skin, src_h, OUT_W as usize, OUT_H as usize, filter);
+        let img = compose(&clean, ui.as_deref(), &tl.frame(i), skin, src_h, OUT_W as usize, OUT_H as usize, filter, blur_fill);
         if wtx.send(img.to_yuv420()).is_err() {
             break; // encoder died; its error is reported below
         }

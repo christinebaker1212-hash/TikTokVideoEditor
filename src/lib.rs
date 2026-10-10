@@ -3,6 +3,7 @@
 
 pub mod camera;
 pub mod compositor;
+pub mod detect;
 pub mod imaging;
 pub mod media;
 pub mod paths;

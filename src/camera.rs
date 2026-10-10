@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use crate::project::{Keyframe, Markers, Part, Project, Skin, OUT_ASPECT};
-use crate::tracking::{smooth, Track};
+use crate::tracking::{smooth, smooth_segments, Track};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Resolved {
@@ -61,11 +61,53 @@ pub struct Cam {
     pub zoom: f64,
 }
 
+/// Smallest zoom: the crop is then as wide as the source (zoom < 1 means the
+/// picture is shrunk to fit and the space above/below is filled).
+pub fn min_zoom(src_w: f64, src_h: f64) -> f64 {
+    (src_h * OUT_ASPECT / src_w).min(1.0)
+}
+
 pub fn clamp_cam(c: Cam, src_w: f64, src_h: f64) -> Cam {
-    let zoom = c.zoom.clamp(1.0, 8.0);
+    let zoom = c.zoom.clamp(min_zoom(src_w, src_h), 8.0);
     let (cw, ch) = crop_size(zoom, src_h);
     let cw = cw.min(src_w);
-    Cam { cx: c.cx.clamp(cw / 2.0, src_w - cw / 2.0), cy: c.cy.clamp(ch / 2.0, src_h - ch / 2.0), zoom }
+    // Zoomed out, the whole source height is visible: centre it vertically.
+    let cy = if zoom < 1.0 { src_h / 2.0 } else { c.cy.clamp(ch / 2.0, src_h - ch / 2.0) };
+    Cam { cx: c.cx.clamp(cw / 2.0, src_w - cw / 2.0), cy, zoom }
+}
+
+/// Running min (or max) over a window of +-`r` samples.
+fn running(v: &[f64], r: usize, max: bool) -> Vec<f64> {
+    (0..v.len())
+        .map(|i| {
+            let w = &v[i.saturating_sub(r)..(i + r + 1).min(v.len())];
+            if max { w.iter().cloned().fold(f64::MIN, f64::max) } else { w.iter().cloned().fold(f64::MAX, f64::min) }
+        })
+        .collect()
+}
+
+/// Run `f` on each shot (split at `cuts`) separately.
+fn per_shot(v: &[f64], cuts: &[usize], f: impl Fn(&[f64]) -> Vec<f64>) -> Vec<f64> {
+    let mut out = Vec::with_capacity(v.len());
+    let mut start = 0;
+    for &c in cuts.iter().filter(|&&c| c > 0 && c < v.len()).chain(std::iter::once(&v.len())) {
+        if c > start {
+            out.extend(f(&v[start..c]));
+            start = c;
+        }
+    }
+    out
+}
+
+/// Fighter positions on the timeline: smoothed centre and a conservative
+/// left/right envelope of the action (for keeping both fighters in frame).
+struct Action {
+    cx: Vec<f64>,
+    cy: Vec<f64>,
+    left: Vec<f64>,
+    right: Vec<f64>,
+    /// Largest zoom that still fits both fighters plus the margin.
+    fit_zoom: Vec<f64>,
 }
 
 pub fn ease(name: &str, w: f64) -> f64 {
@@ -171,38 +213,111 @@ pub fn build_timeline(project: &Project, track: Option<&Track>, fps: f64, src_w:
     let n = (((markers.out - markers.t_in) * fps).round() as usize).max(1);
     let times: Vec<f64> = (0..n).map(|i| markers.t_in + i as f64 / fps).collect();
 
-    let auto = |smoothing: f64| -> (Vec<f64>, Vec<f64>) {
+    let framing = &cam.framing;
+    let margin = framing.margin.max(0.0);
+    let zmin = min_zoom(src_w, src_h);
+    let full_w = src_h * OUT_ASPECT; // crop width at zoom 1
+    let action = |smoothing: f64| -> Action {
         match track {
             Some(tr) if tr.frames > 0 => {
                 let tfps = if tr.fps > 0.0 { tr.fps } else { fps };
                 let tt: Vec<f64> = (0..tr.frames).map(|k| k as f64 / tfps).collect();
-                let rx: Vec<f64> = tr.center_x.iter().map(|v| v * src_w / tr.width as f64).collect();
-                let ry: Vec<f64> = tr.center_y.iter().map(|v| v * src_h / tr.height as f64).collect();
-                let sx = smooth(&rx, smoothing * tfps, 7);
-                let sy = smooth(&ry, smoothing * tfps, 7);
-                (times.iter().map(|&t| interp(t, &tt, &sx)).collect(), times.iter().map(|&t| interp(t, &tt, &sy)).collect())
+                let (kx, ky) = (src_w / tr.width as f64, src_h / tr.height as f64);
+                // Missing series (hand-built tracks) fall back to the centre.
+                let series = |v: &[f64], k: f64| {
+                    let v = if v.len() == tr.frames { v } else { &tr.center_x };
+                    v.iter().map(|x| x * k).collect::<Vec<f64>>()
+                };
+                let scale = |v: &[f64], k: f64| series(v, k);
+                let (rx, ry) = (scale(&tr.center_x, kx), if tr.center_y.len() == tr.frames { scale(&tr.center_y, ky) } else { vec![src_h / 2.0; tr.frames] });
+                let sigma = smoothing * tfps;
+                let sx = smooth_segments(&rx, sigma, 7, &tr.cuts);
+                let sy = smooth_segments(&ry, sigma, 7, &tr.cuts);
+                // Envelope: widen first (running min/max), then smooth, so the
+                // frame opens up a little before a fighter would leave it.
+                let r = (0.4 * tfps) as usize;
+                let left = per_shot(&scale(&tr.left, kx), &tr.cuts, |s| smooth(&running(s, r, false), 0.25 * tfps, 1));
+                let right = per_shot(&scale(&tr.right, kx), &tr.cuts, |s| smooth(&running(s, r, true), 0.25 * tfps, 1));
+                let fit: Vec<f64> = left.iter().zip(&right).map(|(l, r)| (full_w / (r - l + 2.0 * margin).max(1.0)).max(zmin)).collect();
+                // Zoom changes are slow and start early: running min, then smooth.
+                let fit = per_shot(&fit, &tr.cuts, |s| smooth(&running(s, (0.5 * tfps) as usize, false), 0.3 * tfps, 1));
+                let at = |v: &[f64]| times.iter().map(|&t| interp(t, &tt, v)).collect::<Vec<f64>>();
+                Action { cx: at(&sx), cy: at(&sy), left: at(&left), right: at(&right), fit_zoom: at(&fit) }
             }
-            _ => (vec![src_w / 2.0; n], vec![src_h / 2.0; n]),
+            _ => Action {
+                cx: vec![src_w / 2.0; n],
+                cy: vec![src_h / 2.0; n],
+                left: vec![src_w / 2.0; n],
+                right: vec![src_w / 2.0; n],
+                fit_zoom: vec![f64::MAX; n],
+            },
         }
     };
+    // Gameplay camera: centre on the fighters and, if enabled, zoom out just
+    // enough to keep both in frame; offsets can never push one out.
+    let gameplay = |a: &Action, i: usize, base_zoom: f64, offset_x: f64, cy: f64| -> Cam {
+        let zoom = if framing.keep_both { base_zoom.min(a.fit_zoom[i]) } else { base_zoom };
+        let half = crop_size(zoom, src_h).0.min(src_w) / 2.0;
+        let mut cx = a.cx[i] + offset_x;
+        if framing.keep_both && track.is_some() {
+            let (lo, hi) = (a.right[i] + margin - half, a.left[i] - margin + half);
+            cx = if lo <= hi { cx.clamp(lo, hi) } else { (a.left[i] + a.right[i]) / 2.0 };
+        }
+        Cam { cx, cy: if zoom <= 1.0 { src_h / 2.0 } else { cy }, zoom }
+    };
 
-    let (combo_x, _) = auto(cam.combo.smoothing);
-    let combo: Vec<Cam> = combo_x.iter().map(|&x| Cam { cx: x + cam.combo.offset_x, cy: src_h / 2.0, zoom: 1.0 }).collect();
+    let combo_a = action(cam.combo.smoothing);
+    let combo: Vec<Cam> = (0..n).map(|i| gameplay(&combo_a, i, 1.0, cam.combo.offset_x, src_h / 2.0)).collect();
 
     let post_zoom = cam.post.zoom.max(1.0);
-    let (post_x, post_y) = auto(cam.post.smoothing);
+    let post_a = action(cam.post.smoothing);
     let post: Vec<Cam> = (0..n)
-        .map(|i| {
-            // At zoom 1 the crop is full height, so vertical tracking only matters when zoomed.
-            let cy = if post_zoom <= 1.0 { src_h / 2.0 } else { post_y[i] };
-            Cam { cx: post_x[i] + cam.post.offset_x, cy: cy + cam.post.offset_y, zoom: post_zoom }
-        })
+        .map(|i| gameplay(&post_a, i, post_zoom, cam.post.offset_x, post_a.cy[i] + cam.post.offset_y))
         .collect();
 
-    // The super path starts where the combo camera is at superStart.
+    let idx_of = |t: f64| (((t - markers.t_in) * fps).round().max(0.0) as usize).min(n - 1);
+    let sc = &cam.super_;
     let ss = markers.super_start;
-    let start_idx = (((ss - markers.t_in) * fps).round().max(0.0) as usize).min(n - 1);
-    let sup = keyframe_path(&times, ss, combo[start_idx], &cam.super_.keyframes, &cam.super_.easing);
+    // Auto startup: the gameplay camera keeps following both fighters.
+    // Auto cinematic: one framing per shot, centred on the whole animation
+    // (or, optionally, following it), re-centring at each cut.
+    let anim_x: Vec<f64> = match track {
+        Some(tr) if tr.frames > 0 && sc.animation_hold => {
+            let tfps = if tr.fps > 0.0 { tr.fps } else { fps };
+            let tt: Vec<f64> = (0..tr.frames).map(|k| k as f64 / tfps).collect();
+            let rx: Vec<f64> = tr.center_x.iter().map(|v| v * src_w / tr.width as f64).collect();
+            // Shots inside the cinematic: split at cuts and at its start/end.
+            let (a0, a1) = ((markers.anim_start * tfps).round() as usize, (markers.post_start * tfps).round() as usize);
+            let mut bounds: Vec<usize> = tr.cuts.iter().copied().chain([a0, a1]).filter(|&c| c > 0 && c < tr.frames).collect();
+            bounds.sort_unstable();
+            bounds.dedup();
+            let held = per_shot(&rx, &bounds, |shot| {
+                let mut s = shot.to_vec();
+                s.sort_by(f64::total_cmp);
+                vec![s[s.len() / 2]; shot.len()]
+            });
+            times.iter().map(|&t| interp(t, &tt, &held)).collect()
+        }
+        _ => action(sc.smoothing).cx,
+    };
+    let anim_auto: Vec<Cam> = anim_x.iter().map(|&x| Cam { cx: x, cy: src_h / 2.0, zoom: 1.0 }).collect();
+    // Manual keyframes start from wherever the camera is when the first manual part begins.
+    let (manual_t0, manual_start) = if sc.startup_auto {
+        (markers.anim_start, combo[idx_of(markers.anim_start)])
+    } else {
+        (ss, combo[idx_of(ss)])
+    };
+    let manual = keyframe_path(&times, manual_t0, manual_start, &sc.keyframes, &sc.easing);
+    let sup: Vec<Cam> = (0..n)
+        .map(|i| {
+            let in_anim = times[i] >= markers.anim_start;
+            match (in_anim, sc.startup_auto, sc.animation_auto) {
+                (false, true, _) => combo[i],
+                (true, _, true) => anim_auto[i],
+                _ => manual[i],
+            }
+        })
+        .collect();
 
     let tr = &cam.transitions;
     let cams: Vec<Cam> = (0..n)
@@ -302,6 +417,77 @@ mod tests {
         assert!((at_start.cx - 1010.0).abs() < 1e-6, "{at_start:?}");
         let mid = tl.sample(2.0).cam;
         assert!(mid.zoom > 1.0 && mid.zoom < 1.5);
+    }
+
+    #[test]
+    fn auto_super_follows_track_and_snaps_at_cuts() {
+        let mut p = project();
+        p.camera.super_.startup_auto = true;
+        p.camera.super_.animation_auto = true;
+        p.camera.transitions.super_to_post = 0.0;
+        // Action at x=600 until a cut at 2.3 s, then at x=1300.
+        let frames = 150;
+        let cut = (2.3 * 30.0) as usize;
+        let cx: Vec<f64> = (0..frames).map(|i| if i < cut { 600.0 } else { 1300.0 }).collect();
+        let tr = Track { fps: 30.0, width: 1920, height: 1080, frames, center_x: cx, center_y: vec![540.0; frames], cuts: vec![cut], ..Default::default() };
+        let tl = build_timeline(&p, Some(&tr), 30.0, 1920.0, 1080.0, 5.0);
+        assert!((tl.sample(1.7).cam.cx - 600.0).abs() < 1.0, "startup follows the fighters");
+        assert!((tl.sample(2.25).cam.cx - 600.0).abs() < 1.0, "no glide before the cut");
+        assert!((tl.sample(2.31).cam.cx - 1300.0).abs() < 1.0, "snaps at the cut");
+        // Manual keyframes in an auto part are ignored.
+        assert!((tl.sample(2.5).cam.zoom - 1.0).abs() < 1e-9);
+    }
+
+    fn wide_track(frames: usize, left: f64, right: f64) -> Track {
+        Track {
+            fps: 30.0,
+            width: 1920,
+            height: 1080,
+            frames,
+            left: vec![left; frames],
+            right: vec![right; frames],
+            center_x: vec![(left + right) / 2.0; frames],
+            center_y: vec![540.0; frames],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn far_apart_fighters_both_stay_in_frame() {
+        let mut p = Project::default();
+        p.camera.combo.offset_x = 300.0; // must not push a fighter out
+        let tr = wide_track(90, 500.0, 1500.0); // 1000 px apart, crop at zoom 1 is 607.5
+        let tl = build_timeline(&p, Some(&tr), 30.0, 1920.0, 1080.0, 3.0);
+        let c = tl.sample(1.5).cam;
+        let (cw, _) = crop_size(c.zoom, 1080.0);
+        assert!(c.zoom < 1.0, "zooms out: {c:?}");
+        assert!(c.cx - cw / 2.0 <= 500.0 - 59.0 && c.cx + cw / 2.0 >= 1500.0 + 59.0, "both inside with margin: {c:?} {cw}");
+        // Close together: native scale (zoom 1), centred on them.
+        let tr = wide_track(90, 900.0, 1100.0);
+        p.camera.combo.offset_x = 0.0;
+        let c = build_timeline(&p, Some(&tr), 30.0, 1920.0, 1080.0, 3.0).sample(1.5).cam;
+        assert!((c.zoom - 1.0).abs() < 1e-9 && (c.cx - 1000.0).abs() < 1e-6, "{c:?}");
+        // Turning the rule off keeps native scale.
+        p.camera.framing.keep_both = false;
+        let tr = wide_track(90, 500.0, 1500.0);
+        let c = build_timeline(&p, Some(&tr), 30.0, 1920.0, 1080.0, 3.0).sample(1.5).cam;
+        assert!((c.zoom - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cinematic_holds_one_framing_per_shot() {
+        let mut p = project();
+        p.camera.super_.animation_auto = true;
+        p.camera.transitions.super_to_post = 0.0;
+        // Wobbling action, cut at 2.5 s (frame 75) from x~600 to x~1300.
+        let frames = 150;
+        let cx: Vec<f64> = (0..frames).map(|i| if i < 75 { 600.0 } else { 1300.0 } + 80.0 * (i as f64 * 0.7).sin()).collect();
+        let tr = Track { fps: 30.0, width: 1920, height: 1080, frames, left: cx.clone(), right: cx.clone(), center_x: cx, center_y: vec![540.0; frames], cuts: vec![75], ..Default::default() };
+        let tl = build_timeline(&p, Some(&tr), 30.0, 1920.0, 1080.0, 5.0);
+        let (a, b) = (tl.sample(2.1).cam.cx, tl.sample(2.4).cam.cx);
+        assert!((a - b).abs() < 1e-9 && (a - 600.0).abs() < 60.0, "steady within a shot: {a} {b}");
+        let c = tl.sample(2.6).cam.cx;
+        assert!((c - 1300.0).abs() < 60.0 && (c - tl.sample(2.9).cam.cx).abs() < 1e-9, "re-centred after the cut: {c}");
     }
 
     #[test]
